@@ -1,9 +1,11 @@
+use crate::analyzer::gpu::create_session_with_fallback;
 use image::RgbImage;
 use ndarray::Array4;
-use ort::session::{Session, builder::GraphOptimizationLevel};
+use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Value;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BBox {
     pub x1: f32,
     pub y1: f32,
@@ -19,15 +21,9 @@ pub struct FaceDetector {
 
 impl FaceDetector {
     pub fn new(model_path: &str) -> anyhow::Result<Self> {
-        let session = Session::builder().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let session = crate::analyzer::gpu::with_gpu_providers(session)?;
-        let session = session
-            .with_intra_threads(4)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .commit_from_file(model_path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let session =
+            create_session_with_fallback(model_path, GraphOptimizationLevel::Level3, Some(4))?;
+
         Ok(Self {
             session,
             width: 320,
@@ -62,17 +58,10 @@ impl FaceDetector {
         let (_, boxes) = outputs["boxes"].try_extract_tensor::<f32>()?;
 
         let n = scores.len() / 2;
-        let mut max0 = f32::MIN;
-        let mut max1 = f32::MIN;
-        for i in 0..n {
-            max0 = max0.max(scores[i * 2]);
-            max1 = max1.max(scores[i * 2 + 1]);
-        }
-        eprintln!("max score[0]={max0:.4} max score[1]={max1:.4}");
-
         let mut best: Option<(f32, BBox)> = None;
+
         for i in 0..n {
-            let face_score = scores[i * 2];
+            let face_score = scores[i * 2 + 1];
             if face_score < 0.7 {
                 continue;
             }
@@ -89,10 +78,7 @@ impl FaceDetector {
                 },
             ));
         }
-        eprintln!(
-            "max face score this frame: {:?}",
-            best.as_ref().map(|(s, _)| s)
-        );
+
         Ok(best.map(|(_, b)| b))
     }
 }

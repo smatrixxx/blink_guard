@@ -1,7 +1,9 @@
 use crate::analyzer::face_detector::BBox;
+use crate::analyzer::gpu::create_session_with_fallback;
 use image::RgbImage;
 use ndarray::Array4;
-use ort::session::{Session, builder::GraphOptimizationLevel};
+use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Value;
 
 const INPUT_SIZE: u32 = 256;
@@ -14,16 +16,11 @@ pub struct LandmarkModel {
 
 impl LandmarkModel {
     pub fn new(model_path: &str) -> anyhow::Result<Self> {
-        let session = Session::builder()
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level1)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .commit_from_file(model_path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let session =
+            create_session_with_fallback(model_path, GraphOptimizationLevel::Level3, Some(4))?;
 
         let input_name = session.inputs()[0].name().to_string();
         let output_name = session.outputs()[0].name().to_string();
-        eprintln!("facemesh input='{input_name}' output='{output_name}'");
 
         Ok(Self {
             session,

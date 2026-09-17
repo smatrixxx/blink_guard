@@ -1,13 +1,11 @@
 use crossbeam_channel::{Receiver, bounded};
-use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use nokhwa::Camera;
-use nokhwa::pixel_format::RgbAFormat;
-use nokhwa::utils::{CameraFormat, FrameFormat, RequestedFormat, RequestedFormatType, Resolution};
+use nokhwa::pixel_format::RgbFormat;
+use nokhwa::utils::{RequestedFormat, RequestedFormatType};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-// structure send frame
 pub struct FrameData {
     pub width: usize,
     pub height: usize,
@@ -16,29 +14,33 @@ pub struct FrameData {
 
 pub struct CameraApp {
     pub receiver: Receiver<FrameData>,
-    texture: Option<TextureHandle>,
     running: Arc<AtomicBool>,
 }
 
 impl CameraApp {
     pub fn new(camera_info: &nokhwa::utils::CameraInfo) -> Self {
-        // channel with delay in 1-2 frames, to not save up delay
         let (sender, receiver) = bounded::<FrameData>(2);
         let running = Arc::new(AtomicBool::new(true));
         let running_thread = running.clone();
 
-        let index = nokhwa::utils::CameraIndex::Index(0);
+        let index = camera_info.index().clone();
 
-        // start record in separate system thread
         thread::spawn(move || {
-            let requested = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
-                CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 30),
-            ));
-            let mut camera = match Camera::new(index, requested) {
+            let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::None);
+
+            let mut camera = match Camera::new(index.clone(), requested) {
                 Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Camera opening error: {e}");
-                    return;
+                Err(_) => {
+                    let fallback = RequestedFormat::new::<RgbFormat>(
+                        RequestedFormatType::AbsoluteHighestFrameRate,
+                    );
+                    match Camera::new(index, fallback) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("Camera opening error: {e}");
+                            return;
+                        }
+                    }
                 }
             };
 
@@ -47,23 +49,27 @@ impl CameraApp {
                 return;
             }
 
+            let mut rgb_buffer = Vec::new();
+
             while running_thread.load(Ordering::Relaxed) {
                 match camera.frame() {
                     Ok(frame) => {
                         let res = frame.resolution();
-                        // декодируем кадр напрямую в сырой буфер Rgba
-                        let mut rgba_buffer = vec![0u8; (res.width() * res.height() * 4) as usize];
+                        let buffer_size = (res.width() * res.height() * 3) as usize;
+                        if rgb_buffer.len() != buffer_size {
+                            rgb_buffer.resize(buffer_size, 0);
+                        }
+
                         if frame
-                            .decode_image_to_buffer::<RgbAFormat>(&mut rgba_buffer)
+                            .decode_image_to_buffer::<RgbFormat>(&mut rgb_buffer)
                             .is_ok()
                         {
                             let data = FrameData {
                                 width: res.width() as usize,
                                 height: res.height() as usize,
-                                pixels: rgba_buffer,
+                                pixels: rgb_buffer.clone(),
                             };
 
-                            // if ui doesnt have enough time to catch frames, pull out old
                             let _ = sender.try_send(data);
                         }
                     }
@@ -75,11 +81,7 @@ impl CameraApp {
             }
         });
 
-        Self {
-            receiver,
-            texture: None,
-            running,
-        }
+        Self { receiver, running }
     }
 }
 
