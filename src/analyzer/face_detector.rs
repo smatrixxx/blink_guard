@@ -1,9 +1,11 @@
-use crate::analyzer::gpu::create_session_with_fallback;
+use crate::analyzer::gpu::create_session_from_bytes;
 use image::RgbImage;
 use ndarray::Array4;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Value;
+
+const MODEL_BYTES: &[u8] = include_bytes!("../../models/face_detector.onnx");
 
 #[derive(Clone, Debug)]
 pub struct BBox {
@@ -20,9 +22,13 @@ pub struct FaceDetector {
 }
 
 impl FaceDetector {
-    pub fn new(model_path: &str) -> anyhow::Result<Self> {
-        let session =
-            create_session_with_fallback(model_path, GraphOptimizationLevel::Level3, Some(4))?;
+    pub fn new() -> anyhow::Result<Self> {
+        let session = create_session_from_bytes(
+            MODEL_BYTES,
+            "FaceDetector",
+            GraphOptimizationLevel::Level3,
+            Some(4),
+        )?;
 
         Ok(Self {
             session,

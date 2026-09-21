@@ -56,11 +56,7 @@ fn main() -> anyhow::Result<()> {
     let camera = CameraApp::new(&camera_info);
     let frames = camera.receiver.clone();
 
-    let analyzer = analyzer::Analyzer::new(
-        frames,
-        "models/face_detector.onnx",
-        "models/face_landmarks.onnx",
-    )?;
+    let analyzer = analyzer::Analyzer::new(frames)?;
 
     eframe::run_native(
         "Blink Guard",

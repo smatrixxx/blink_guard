@@ -1,12 +1,13 @@
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 
-pub fn create_session_with_fallback(
-    model_path: &str,
+pub fn create_session_from_bytes(
+    model_bytes: &[u8],
+    model_name: &str,
     optimization_level: GraphOptimizationLevel,
     intra_threads: Option<usize>,
 ) -> anyhow::Result<Session> {
-    // 1. Пытаемся запустить с GPU
+    // 1. Попытка на GPU
     let gpu_result = (|| -> ort::Result<Session> {
         let mut builder = Session::builder()?;
 
@@ -33,20 +34,18 @@ pub fn create_session_with_fallback(
             builder = builder.with_intra_threads(threads)?;
         }
 
-        builder.commit_from_file(model_path)
+        builder.commit_from_memory(model_bytes)
     })();
 
     match gpu_result {
         Ok(session) => {
-            println!("✓ Модель '{model_path}' успешно запущена на GPU");
+            println!("✓ Модель '{model_name}' запущена на GPU");
             Ok(session)
         }
         Err(err) => {
-            eprintln!(
-                "⚠ Не удалось запустить '{model_path}' на GPU ({err}). Выполняем fallback на CPU..."
-            );
+            eprintln!("⚠ Не удалось запустить '{model_name}' на GPU ({err}). Запуск на CPU...");
 
-            // 2. Чистый fallback на CPU при любой ошибке GPU
+            // 2. Чистый Fallback на CPU
             let mut builder = Session::builder().map_err(|e| anyhow::anyhow!("{e}"))?;
             builder = builder
                 .with_optimization_level(optimization_level)
@@ -59,10 +58,10 @@ pub fn create_session_with_fallback(
             }
 
             let session = builder
-                .commit_from_file(model_path)
+                .commit_from_memory(model_bytes)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            println!("✓ Модель '{model_path}' успешно запущена на CPU");
+            println!("✓ Модель '{model_name}' запущена на CPU");
             Ok(session)
         }
     }

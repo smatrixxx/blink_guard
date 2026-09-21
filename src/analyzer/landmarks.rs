@@ -1,11 +1,12 @@
 use crate::analyzer::face_detector::BBox;
-use crate::analyzer::gpu::create_session_with_fallback;
+use crate::analyzer::gpu::create_session_from_bytes;
 use image::RgbImage;
 use ndarray::Array4;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Value;
 
+const MODEL_BYTES: &[u8] = include_bytes!("../../models/face_landmarks.onnx");
 const INPUT_SIZE: u32 = 256;
 
 pub struct LandmarkModel {
@@ -15,9 +16,13 @@ pub struct LandmarkModel {
 }
 
 impl LandmarkModel {
-    pub fn new(model_path: &str) -> anyhow::Result<Self> {
-        let session =
-            create_session_with_fallback(model_path, GraphOptimizationLevel::Level3, Some(4))?;
+    pub fn new() -> anyhow::Result<Self> {
+        let session = create_session_from_bytes(
+            MODEL_BYTES,
+            "FaceLandmarks",
+            GraphOptimizationLevel::Level3,
+            Some(4),
+        )?;
 
         let input_name = session.inputs()[0].name().to_string();
         let output_name = session.outputs()[0].name().to_string();
@@ -33,7 +38,7 @@ impl LandmarkModel {
         &mut self,
         rgb: &RgbImage,
         bbox: &BBox,
-    ) -> anyhow::Result<Option<Vec<(f32, f32)>>> {
+    ) -> anyhow::Result<Option<Vec<(f32, f32, f32)>>> {
         let margin = 0.3;
         let bbox_w = bbox.x2 - bbox.x1;
         let bbox_h = bbox.y2 - bbox.y1;
@@ -77,7 +82,8 @@ impl LandmarkModel {
             .map(|xyz| {
                 let x = x1 as f32 + (xyz[0] / INPUT_SIZE as f32) * side as f32;
                 let y = y1 as f32 + (xyz[1] / INPUT_SIZE as f32) * side as f32;
-                (x, y)
+                let z = (xyz[2] / INPUT_SIZE as f32) * side as f32; // Сохраняем координату Z
+                (x, y, z)
             })
             .collect();
 

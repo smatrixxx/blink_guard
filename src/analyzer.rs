@@ -3,7 +3,7 @@ pub mod face_detector;
 pub mod gpu;
 pub mod landmarks;
 
-pub use ear::compute_ear;
+pub use ear::compute_ear_3d;
 pub use face_detector::{BBox, FaceDetector};
 pub use landmarks::LandmarkModel;
 
@@ -32,7 +32,7 @@ pub enum BlinkEvent {
     StareAlert {
         seconds_without_blink: u64,
     },
-    FaceLost, // Человек отошел от камеры / лицо не найдено
+    FaceLost,
     CalibrationProgress {
         step: CalibrationStep,
         progress: f32,
@@ -74,8 +74,7 @@ enum InternalState {
         samples: Vec<f32>,
     },
     Running {
-        blink_delta: f32,      // Индивидуальная амплитуда моргания (open - closed)
-        dynamic_baseline: f32, // Динамический уровень открытого глаза для текущей позы
+        dynamic_baseline: f32,
     },
 }
 
@@ -88,13 +87,9 @@ fn calculate_median(mut vals: Vec<f32>) -> f32 {
 }
 
 impl Analyzer {
-    pub fn new(
-        frames: Receiver<FrameData>,
-        detector_path: &str,
-        landmark_path: &str,
-    ) -> anyhow::Result<Self> {
-        let mut detector = FaceDetector::new(detector_path)?;
-        let mut landmarker = LandmarkModel::new(landmark_path)?;
+    pub fn new(frames: Receiver<FrameData>) -> anyhow::Result<Self> {
+        let mut detector = FaceDetector::new()?;
+        let mut landmarker = LandmarkModel::new()?;
 
         let (event_tx, event_rx) = bounded::<BlinkEvent>(16);
         let (preview_tx, preview_rx) = bounded::<AnnotatedFrame>(1);
@@ -103,22 +98,20 @@ impl Analyzer {
         let running = Arc::new(AtomicBool::new(true));
         let running_thread = running.clone();
 
-        let mut smoothed_points: Option<Vec<(f32, f32)>> = None;
+        let mut smoothed_points: Option<Vec<(f32, f32, f32)>> = None;
         let mut cached_bbox: Option<BBox> = None;
         let mut frames_since_detect: u32 = 0;
 
-        // Переменные аналитики времени и морганий
         let mut blink_count: u32 = 0;
         let mut close_start: Option<Instant> = None;
         let mut last_blink_time = Instant::now();
         let mut blink_history: VecDeque<Instant> = VecDeque::new();
         let mut stare_alert_sent = false;
 
-        const STARE_TIMEOUT: Duration = Duration::from_secs(12); // Порог замирания без моргания
-        const MIN_BLINK_MS: u128 = 65; // Меньше 65 мс — шум детектора
-        const MAX_BLINK_MS: u128 = 380; // Больше 380 мс — прищур или дремота
+        const STARE_TIMEOUT: Duration = Duration::from_secs(12);
+        const MIN_BLINK_MS: u128 = 65;
+        const MAX_BLINK_MS: u128 = 380;
 
-        // Настройки трекинга
         const REDETECT_EVERY: u32 = 6;
         const MAX_JUMP: f32 = 28.0;
         const SMOOTHING: f32 = 0.40;
@@ -129,7 +122,6 @@ impl Analyzer {
             let mut state = InternalState::WaitingForFace;
 
             while running_thread.load(Ordering::Relaxed) {
-                // Обработка внешних команд (например, кнопка «Калибровка» в UI)
                 while let Ok(cmd) = command_rx.try_recv() {
                     match cmd {
                         AnalyzerCommand::Recalibrate => {
@@ -150,7 +142,7 @@ impl Analyzer {
 
                 frame_counter = frame_counter.wrapping_add(1);
                 if frame_counter % 2 != 0 {
-                    continue; // Пропуск каждого второго кадра (~15 FPS)
+                    continue;
                 }
 
                 let Some(mut rgb) = image::RgbImage::from_raw(
@@ -162,7 +154,7 @@ impl Analyzer {
                     continue;
                 };
 
-                // === Умный трекинг лица ===
+                // === Трекинг BBox ===
                 let need_redetect = cached_bbox.is_none() || frames_since_detect >= REDETECT_EVERY;
 
                 let bbox = if need_redetect {
@@ -189,7 +181,6 @@ impl Analyzer {
                             smoothed
                         }
                         Ok(None) => {
-                            // ЛИЦО НЕ НАЙДЕНО: сбрасываем таймеры, чтобы не слать ложных алертов в пустую комнату
                             cached_bbox = None;
                             smoothed_points = None;
                             close_start = None;
@@ -215,11 +206,10 @@ impl Analyzer {
                     cached_bbox.clone().unwrap()
                 };
 
-                // === Лендмарки лица ===
+                // === Лендмарки (3D) ===
                 let all_points = match landmarker.predict(&rgb, &bbox) {
                     Ok(Some(p)) => p,
                     Ok(None) => {
-                        // СЕТКА СЪЕХАЛА / ЛИЦО ПОТЕРЯНО: сбрасываем таймеры
                         cached_bbox = None;
                         smoothed_points = None;
                         close_start = None;
@@ -241,13 +231,16 @@ impl Analyzer {
                     }
                 };
 
-                // === Сглаживание точек ===
+                // === Сглаживание точек в 3D ===
                 let all_points = match &smoothed_points {
                     Some(prev) => {
                         let max_jump = prev
                             .iter()
                             .zip(all_points.iter())
-                            .map(|(a, b)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt())
+                            .map(|(a, b)| {
+                                ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2))
+                                    .sqrt()
+                            })
                             .fold(0.0_f32, f32::max);
 
                         if max_jump > MAX_JUMP {
@@ -260,6 +253,7 @@ impl Analyzer {
                                     (
                                         old.0 + (new.0 - old.0) * SMOOTHING,
                                         old.1 + (new.1 - old.1) * SMOOTHING,
+                                        old.2 + (new.2 - old.2) * SMOOTHING,
                                     )
                                 })
                                 .collect()
@@ -270,11 +264,11 @@ impl Analyzer {
 
                 smoothed_points = Some(all_points.clone());
 
-                // === Вычисление EAR для обоих глаз ===
+                // === Расчет 3D EAR ===
                 const RIGHT_EYE_IDX: [usize; 6] = [33, 160, 158, 133, 153, 144];
                 const LEFT_EYE_IDX: [usize; 6] = [263, 387, 385, 362, 380, 373];
 
-                fn pick_eye(all: &[(f32, f32)], idx: &[usize; 6]) -> [(f32, f32); 6] {
+                fn pick_eye(all: &[(f32, f32, f32)], idx: &[usize; 6]) -> [(f32, f32, f32); 6] {
                     [
                         all[idx[0]],
                         all[idx[1]],
@@ -287,15 +281,14 @@ impl Analyzer {
 
                 let left_eye = pick_eye(&all_points, &LEFT_EYE_IDX);
                 let right_eye = pick_eye(&all_points, &RIGHT_EYE_IDX);
-                let ear_left = compute_ear(&left_eye);
-                let ear_right = compute_ear(&right_eye);
+                let ear_left = compute_ear_3d(&left_eye);
+                let ear_right = compute_ear_3d(&right_eye);
 
-                // ЗАЩИТА ОТ ПОВОРОТА (Yaw): при повороте головы один глаз оптически сплющивается,
-                // но второй открыт. Пока хотя бы один открыт — человек не моргнул.
+                // Защита от поворота головы (Yaw)
                 let ear = ear_left.max(ear_right);
 
-                // Отрисовка контуров глаз
-                for (i, &(x, y)) in all_points.iter().enumerate() {
+                // Отрисовка точек на превью
+                for (i, &(x, y, _z)) in all_points.iter().enumerate() {
                     let color = if LEFT_EYE_IDX.contains(&i) {
                         image::Rgb([255, 60, 60])
                     } else if RIGHT_EYE_IDX.contains(&i) {
@@ -313,7 +306,7 @@ impl Analyzer {
 
                 let now = Instant::now();
 
-                // === Калибровка и работа трекера ===
+                // === Калибровка и трекинг ===
                 match &mut state {
                     InternalState::WaitingForFace => {
                         let _ = event_tx.try_send(BlinkEvent::CalibrationProgress {
@@ -329,7 +322,7 @@ impl Analyzer {
                     InternalState::CalibratingOpen { start, samples } => {
                         samples.push(ear);
                         let elapsed = start.elapsed().as_secs_f32();
-                        let target = 3.0; // 3 секунды держим открытыми
+                        let target = 3.0;
 
                         let _ = event_tx.try_send(BlinkEvent::CalibrationProgress {
                             step: CalibrationStep::EyesOpen,
@@ -353,7 +346,7 @@ impl Analyzer {
                     } => {
                         samples.push(ear);
                         let elapsed = start.elapsed().as_secs_f32();
-                        let target = 2.0; // 2 секунды держим закрытыми
+                        let target = 2.0;
 
                         let _ = event_tx.try_send(BlinkEvent::CalibrationProgress {
                             step: CalibrationStep::EyesClosed,
@@ -367,12 +360,11 @@ impl Analyzer {
                             let (valid_open, valid_closed) = if open > closed_ear + 0.04 {
                                 (open, closed_ear)
                             } else {
-                                (0.30, 0.14) // безопасный fallback
+                                (0.30, 0.14)
                             };
 
-                            let blink_delta = (valid_open - valid_closed).max(0.06);
                             let dynamic_baseline = valid_open;
-                            let initial_threshold = dynamic_baseline - (blink_delta * 0.50);
+                            let initial_threshold = dynamic_baseline * 0.78;
 
                             let _ = event_tx.try_send(BlinkEvent::CalibrationDone {
                                 open_ear: valid_open,
@@ -381,35 +373,35 @@ impl Analyzer {
                             });
 
                             last_blink_time = now;
-                            state = InternalState::Running {
-                                blink_delta,
-                                dynamic_baseline,
-                            };
+                            state = InternalState::Running { dynamic_baseline };
                         }
                     }
 
-                    InternalState::Running {
-                        blink_delta,
-                        dynamic_baseline,
-                    } => {
-                        let threshold = *dynamic_baseline - (*blink_delta * 0.50);
+                    InternalState::Running { dynamic_baseline } => {
+                        // Относительный порог: 78% от текущей позы
+                        let threshold = *dynamic_baseline * 0.78;
 
-                        // === ДЕТЕКЦИЯ МОРГАНИЯ ПО ВРЕМЕНИ (Instant) ===
                         if ear < threshold {
                             if close_start.is_none() {
                                 close_start = Some(now);
+                            } else if let Some(start) = close_start {
+                                // АНТИ-ДЕДЛОК: если глаз ниже порога > 380 мс — человек наклонил голову!
+                                // Сбрасываем попытку моргания и плавно опускаем базу вниз под новую позу
+                                if now.duration_since(start).as_millis() > 380 {
+                                    close_start = None;
+                                    *dynamic_baseline += (ear - *dynamic_baseline) * 0.10;
+                                    *dynamic_baseline = dynamic_baseline.clamp(0.18, 0.45);
+                                }
                             }
                         } else {
                             if let Some(start) = close_start.take() {
                                 let duration_ms = now.duration_since(start).as_millis();
 
-                                // Валидация физиологической длительности (65 - 380 мс)
                                 if (MIN_BLINK_MS..=MAX_BLINK_MS).contains(&duration_ms) {
                                     blink_count += 1;
                                     last_blink_time = now;
                                     stare_alert_sent = false;
 
-                                    // Скользящая история морганий за 60 секунд (BPM)
                                     blink_history.push_back(now);
                                     while let Some(&t) = blink_history.front() {
                                         if now.duration_since(t) > Duration::from_secs(60) {
@@ -429,14 +421,12 @@ impl Analyzer {
                                 }
                             }
 
-                            // Адаптация базы под позу головы (обновляем только когда глаза открыты)
-                            if ear > threshold {
-                                *dynamic_baseline += (ear - *dynamic_baseline) * 0.05;
-                                *dynamic_baseline = dynamic_baseline.clamp(0.18, 0.45);
-                            }
+                            // Плавная адаптация базы за позой при открытых глазах
+                            *dynamic_baseline += (ear - *dynamic_baseline) * 0.06;
+                            *dynamic_baseline = dynamic_baseline.clamp(0.18, 0.45);
                         }
 
-                        // === ПРОВЕРКА НА ЗАМИРАНИЕ ВЗГЛЯДА (Stare Alert) ===
+                        // Проверка замирания (Stare Alert)
                         let time_since_blink = now.duration_since(last_blink_time);
                         if time_since_blink >= STARE_TIMEOUT && !stare_alert_sent {
                             stare_alert_sent = true;
@@ -445,7 +435,7 @@ impl Analyzer {
                             });
                         }
 
-                        // Очистка старых записей из истории
+                        // Очистка старых записей BPM
                         while let Some(&t) = blink_history.front() {
                             if now.duration_since(t) > Duration::from_secs(60) {
                                 blink_history.pop_front();
