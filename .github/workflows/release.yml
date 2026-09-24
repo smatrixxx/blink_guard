@@ -23,9 +23,11 @@ jobs:
             curl \
             git \
             pkg-config \
+            libssl-dev \
             libasound2-dev \
             libdbus-1-dev \
             libudev-dev \
+            libv4l-dev \
             ca-certificates
       - uses: actions/checkout@v4
       - name: Install Rust
