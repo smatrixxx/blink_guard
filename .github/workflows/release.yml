@@ -23,6 +23,8 @@ jobs:
             curl \
             git \
             pkg-config \
+            clang \
+            libclang-dev \
             libssl-dev \
             libasound2-dev \
             libdbus-1-dev \
