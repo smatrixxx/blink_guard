@@ -1,9 +1,8 @@
 use crate::analyzer::face_detector::BBox;
 use crate::analyzer::gpu::create_session_from_bytes;
 use image::RgbImage;
-use ndarray::Array4;
-use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
 use ort::value::Value;
 
 const MODEL_BYTES: &[u8] = include_bytes!("../../models/face_landmarks.onnx");
@@ -61,15 +60,17 @@ impl LandmarkModel {
             image::imageops::FilterType::Triangle,
         );
 
-        let mut tensor = Array4::<f32>::zeros((1, INPUT_SIZE as usize, INPUT_SIZE as usize, 3));
+        let mut raw_vec = vec![0.0f32; 1 * INPUT_SIZE as usize * INPUT_SIZE as usize * 3];
         for (x, y, pixel) in resized.enumerate_pixels() {
             let [r, g, b] = pixel.0;
-            tensor[[0, y as usize, x as usize, 0]] = r as f32 / 255.0;
-            tensor[[0, y as usize, x as usize, 1]] = g as f32 / 255.0;
-            tensor[[0, y as usize, x as usize, 2]] = b as f32 / 255.0;
+            let idx = (y as usize * INPUT_SIZE as usize + x as usize) * 3;
+            raw_vec[idx] = r as f32 / 255.0;
+            raw_vec[idx + 1] = g as f32 / 255.0;
+            raw_vec[idx + 2] = b as f32 / 255.0;
         }
 
-        let input_value = Value::from_array(tensor)?;
+        let input_value =
+            Value::from_array(([1, INPUT_SIZE as usize, INPUT_SIZE as usize, 3], raw_vec))?;
         let outputs = self
             .session
             .run(ort::inputs![self.input_name.as_str() => input_value])
@@ -82,7 +83,7 @@ impl LandmarkModel {
             .map(|xyz| {
                 let x = x1 as f32 + (xyz[0] / INPUT_SIZE as f32) * side as f32;
                 let y = y1 as f32 + (xyz[1] / INPUT_SIZE as f32) * side as f32;
-                let z = (xyz[2] / INPUT_SIZE as f32) * side as f32; // Сохраняем координату Z
+                let z = (xyz[2] / INPUT_SIZE as f32) * side as f32;
                 (x, y, z)
             })
             .collect();

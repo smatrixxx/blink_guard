@@ -1,8 +1,7 @@
 use crate::analyzer::gpu::create_session_from_bytes;
 use image::RgbImage;
-use ndarray::Array4;
-use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
 use ort::value::Value;
 
 const MODEL_BYTES: &[u8] = include_bytes!("../../models/face_detector.onnx");
@@ -46,15 +45,18 @@ impl FaceDetector {
             image::imageops::FilterType::Triangle,
         );
 
-        let mut tensor = Array4::<f32>::zeros((1, 3, self.height as usize, self.width as usize));
+        let plane_size = (self.height as usize) * (self.width as usize);
+        let mut raw_vec = vec![0.0f32; 3 * plane_size];
         for (x, y, pixel) in resized.enumerate_pixels() {
             let [r, g, b] = pixel.0;
-            tensor[[0, 0, y as usize, x as usize]] = (r as f32 - 127.0) / 128.0;
-            tensor[[0, 1, y as usize, x as usize]] = (g as f32 - 127.0) / 128.0;
-            tensor[[0, 2, y as usize, x as usize]] = (b as f32 - 127.0) / 128.0;
+            let y_idx = y as usize * self.width as usize + x as usize;
+            raw_vec[y_idx] = (r as f32 - 127.0) / 128.0;
+            raw_vec[plane_size + y_idx] = (g as f32 - 127.0) / 128.0;
+            raw_vec[2 * plane_size + y_idx] = (b as f32 - 127.0) / 128.0;
         }
 
-        let input_value = Value::from_array(tensor)?;
+        let input_value =
+            Value::from_array(([1, 3, self.height as usize, self.width as usize], raw_vec))?;
         let outputs = self
             .session
             .run(ort::inputs!["input" => input_value])

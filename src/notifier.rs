@@ -1,45 +1,52 @@
 use notify_rust::Notification;
 use rodio::source::{SineWave, Source};
-use rodio::{DeviceSinkBuilder, MixerDeviceSink};
+use rodio::{OutputStream, OutputStreamHandle, Sink};
 use std::time::Duration;
 
 pub struct Notifier {
-    sink: Option<MixerDeviceSink>,
+    _stream: Option<OutputStream>,
+    stream_handle: Option<OutputStreamHandle>,
 }
 
 impl Notifier {
     pub fn new() -> Self {
-        match DeviceSinkBuilder::open_default_sink() {
-            Ok(sink) => Self { sink: Some(sink) },
+        match OutputStream::try_default() {
+            Ok((stream, handle)) => Self {
+                _stream: Some(stream),
+                stream_handle: Some(handle),
+            },
             Err(e) => {
-                eprintln!("Аудиоустройство недоступно: {e}");
-                Self { sink: None }
+                eprintln!("Audio device unavailable: {e}");
+                Self {
+                    _stream: None,
+                    stream_handle: None,
+                }
             }
         }
     }
 
-    /// Проигрывает гармоничный мягкий аккорд (A5 -> C#6)
     pub fn play_chime(&self) {
-        if let Some(sink) = &self.sink {
-            let tone1 = SineWave::new(880.0)
-                .take_duration(Duration::from_millis(70))
-                .amplify(0.12);
-            let tone2 = SineWave::new(1108.7)
-                .take_duration(Duration::from_millis(150))
-                .amplify(0.12);
+        if let Some(handle) = &self.stream_handle {
+            if let Ok(sink) = Sink::try_new(handle) {
+                let tone1 = SineWave::new(880.0)
+                    .take_duration(Duration::from_millis(70))
+                    .amplify(0.12);
+                let tone2 = SineWave::new(1108.7)
+                    .take_duration(Duration::from_millis(150))
+                    .amplify(0.12);
 
-            let mixer = sink.mixer();
-            mixer.add(tone1);
-            mixer.add(tone2);
+                sink.append(tone1);
+                sink.append(tone2);
+                sink.detach();
+            }
         }
     }
 
-    /// Всплывающее системное уведомление
     pub fn send_stare_alert(seconds: u64) {
         std::thread::spawn(move || {
             let _ = Notification::new()
                 .appname("Blink Guard")
-                .summary("Пора поморгать! 👀")
+                .summary("Пора поморгать")
                 .body(&format!(
                     "Вы не моргали уже {seconds} сек.\nСделайте пару морганий для увлажнения глаз."
                 ))
@@ -55,7 +62,7 @@ impl Notifier {
                 .appname("Blink Guard")
                 .summary("Низкая частота моргания")
                 .body(&format!(
-                    "Частота всего {bpm:.1} морганий/мин (норма: 12-20).\nНе забывайте моргать чаще!"
+                    "Частота всего {bpm:.1} морганий/мин (норма: 12-20).\nНе забывайте моргать чаще."
                 ))
                 .icon("dialog-warning")
                 .timeout(4000)
