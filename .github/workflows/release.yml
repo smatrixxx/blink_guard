@@ -12,13 +12,13 @@ permissions:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
-    container:
-      image: ubuntu:20.04
+    env:
+      RUSTFLAGS: "-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc"
     steps:
       - name: Install dependencies
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
             build-essential \
             curl \
             git \
@@ -30,22 +30,40 @@ jobs:
             libdbus-1-dev \
             libudev-dev \
             libv4l-dev \
-            ca-certificates
+            wget
       - uses: actions/checkout@v4
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - uses: dtolnay/rust-toolchain@stable
       - name: Build release
         run: cargo build --release
       - name: Prepare binary
         run: |
           strip target/release/blink_guard
           cp target/release/blink_guard blink_guard-linux-x86_64
+      - name: Create AppImage
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp target/release/blink_guard AppDir/usr/bin/blink_guard
+          ln -s usr/bin/blink_guard AppDir/AppRun
+          cat << 'EOF' > AppDir/blink_guard.desktop
+          [Desktop Entry]
+          Name=Blink Guard
+          Exec=blink_guard
+          Icon=blink_guard
+          Type=Application
+          Categories=Utility;
+          EOF
+          echo "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAGUlEQVRYR+3BMQEAAADCoPVPbQhfoAAAAAB4mgAJuAAB9wWpRAAAAABJRU5ErkJggg==" | base64 -d > AppDir/blink_guard.png
+          cp AppDir/blink_guard.png AppDir/.DirIcon
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          ./appimagetool-x86_64.AppImage --appimage-extract
+          ARCH=x86_64 ./squashfs-root/AppRun AppDir blink_guard-linux-x86_64.AppImage
       - uses: actions/upload-artifact@v4
         with:
-          name: blink_guard-linux-x86_64
-          path: blink_guard-linux-x86_64
+          name: linux-artifacts
+          path: |
+            blink_guard-linux-x86_64
+            blink_guard-linux-x86_64.AppImage
 
   build-windows:
     runs-on: windows-latest
@@ -59,7 +77,7 @@ jobs:
         run: cp target/release/blink_guard.exe blink_guard-windows-x86_64.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: blink_guard-windows-x86_64
+          name: windows-artifacts
           path: blink_guard-windows-x86_64.exe
 
   publish-release:
@@ -70,16 +88,17 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: blink_guard-linux-x86_64
+          name: linux-artifacts
           path: ./
       - uses: actions/download-artifact@v4
         with:
-          name: blink_guard-windows-x86_64
+          name: windows-artifacts
           path: ./
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
+            blink_guard-linux-x86_64.AppImage
             blink_guard-linux-x86_64
             blink_guard-windows-x86_64.exe
